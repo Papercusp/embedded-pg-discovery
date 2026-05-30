@@ -16,6 +16,8 @@ const { url, source } = resolvePgUrl({
 ```
 
 Resolution order: env vars (in order) → discovery file's `url` field →
-fallback. Pure, no caching (wrap it if you want memoization), zero
-domain coupling, zero runtime dependencies. The app-specific config
-(which env vars, which file, which fallback) lives in the caller.
+fallback. An env var set to the **empty string is treated as absent** (a
+later env var, then the discovery file, then the fallback still apply).
+Pure, no caching (wrap it if you want memoization), zero domain coupling,
+zero runtime dependencies. The app-specific config (which env vars, which
+file, which fallback) lives in the caller.

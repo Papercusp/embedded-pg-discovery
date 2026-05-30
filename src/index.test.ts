@@ -46,4 +46,16 @@ describe('resolvePgUrl', () => {
     expect(resolvePgUrl({ envVars: ['TEST_PG_A'], fallbackUrl: 'postgres://fb/db' }))
       .toEqual({ url: 'postgres://fb/db', source: 'fallback' });
   });
+
+  // An empty-string env var is treated as ABSENT (truthy check), so a later
+  // env var still wins. This is a deliberate, locked improvement over the
+  // pre-extraction operator code, whose `A ?? B` + `if(fromEnv)` guard let an
+  // empty earlier var mask a valid later one (it fell through to fallback).
+  // Unreachable in the operator (Tauri always injects a real value), but
+  // pinned so the behavior can't silently regress.
+  it('treats an empty-string earlier env var as absent; a later var still wins', () => {
+    process.env.TEST_PG_A = '';
+    process.env.TEST_PG_B = 'postgres://b/db';
+    expect(resolvePgUrl(CFG)).toEqual({ url: 'postgres://b/db', source: 'env' });
+  });
 });
