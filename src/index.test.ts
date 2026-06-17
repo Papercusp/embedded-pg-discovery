@@ -1,6 +1,16 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import * as fs from 'node:fs';
+import * as os from 'node:os';
+import * as path from 'node:path';
 import { resolvePgUrl, type DiscoveryConfig } from './index';
+
+// S4: ESM namespace exports can't be vi.spyOn'd, so mock node:os and drive
+// homedir() via a hoisted, mutable holder the factory closes over.
+const homeHolder = vi.hoisted(() => ({ dir: '' }));
+vi.mock('node:os', async (importActual) => {
+  const actual = await importActual<typeof import('node:os')>();
+  return { ...actual, homedir: () => homeHolder.dir || actual.homedir() };
+});
 
 const CFG: DiscoveryConfig = {
   envVars: ['TEST_PG_A', 'TEST_PG_B'],
@@ -45,6 +55,44 @@ describe('resolvePgUrl', () => {
   it('works with no discoveryFile configured', () => {
     expect(resolvePgUrl({ envVars: ['TEST_PG_A'], fallbackUrl: 'postgres://fb/db' }))
       .toEqual({ url: 'postgres://fb/db', source: 'fallback' });
+  });
+
+  // S4: a RELATIVE discoveryFile.path resolves under os.homedir() (the absolute
+  // branch is covered above by the /tmp/... path). Mock homedir to a temp dir,
+  // drop the file there under the relative name, and assert it resolves.
+  it('resolves a relative discoveryFile.path under the home directory', () => {
+    const home = fs.mkdtempSync(path.join(os.tmpdir(), 'epd-home-'));
+    homeHolder.dir = home;
+    try {
+      fs.writeFileSync(path.join(home, 'epd.json'), JSON.stringify({ url: 'postgres://rel/db' }));
+      const cfg: DiscoveryConfig = {
+        envVars: [],
+        discoveryFile: { path: 'epd.json' }, // relative → joined with homedir()
+        fallbackUrl: 'postgres://fallback/db',
+      };
+      expect(resolvePgUrl(cfg)).toEqual({ url: 'postgres://rel/db', source: 'discovery-file' });
+    } finally {
+      fs.rmSync(home, { recursive: true, force: true });
+      homeHolder.dir = '';
+    }
+  });
+
+  // S4: with the relative path resolved under home but no file present, it falls
+  // through to the fallback (the join must not accidentally hit some other file).
+  it('falls back when the relative discovery file is absent under home', () => {
+    const home = fs.mkdtempSync(path.join(os.tmpdir(), 'epd-home-'));
+    homeHolder.dir = home;
+    try {
+      const cfg: DiscoveryConfig = {
+        envVars: [],
+        discoveryFile: { path: 'nope.json' },
+        fallbackUrl: 'postgres://fallback/db',
+      };
+      expect(resolvePgUrl(cfg)).toEqual({ url: 'postgres://fallback/db', source: 'fallback' });
+    } finally {
+      fs.rmSync(home, { recursive: true, force: true });
+      homeHolder.dir = '';
+    }
   });
 
   // An empty-string env var is treated as ABSENT (truthy check), so a later
