@@ -106,4 +106,46 @@ describe('resolvePgUrl', () => {
     process.env.TEST_PG_B = 'postgres://b/db';
     expect(resolvePgUrl(CFG)).toEqual({ url: 'postgres://b/db', source: 'env' });
   });
+
+  // EI-18132413325218110's root cause: a discovery file survives its writer's death (crash,
+  // SIGKILL, host reboot with no cleanup) and, absent a liveness check, wins over the fallback
+  // forever — every consumer gets a permanent ECONNREFUSED on the recorded dead port.
+  describe('pid liveness (stale discovery file)', () => {
+    it('trusts the discovery file when its recorded pid is alive', () => {
+      fs.writeFileSync(
+        '/tmp/__epd_test_discovery.json',
+        JSON.stringify({ url: 'postgres://disc/db', pid: process.pid }),
+      );
+      expect(resolvePgUrl(CFG)).toEqual({ url: 'postgres://disc/db', source: 'discovery-file' });
+    });
+
+    it('falls back when the recorded pid is dead (a stale file from a long-gone writer)', () => {
+      // A pid essentially guaranteed not to exist: max signed 32-bit minus a bit of headroom.
+      const deadPid = 2_147_480_000;
+      fs.writeFileSync(
+        '/tmp/__epd_test_discovery.json',
+        JSON.stringify({ url: 'postgres://disc/db', pid: deadPid }),
+      );
+      expect(resolvePgUrl(CFG)).toEqual({ url: 'postgres://fallback/db', source: 'fallback' });
+    });
+
+    it('trusts the discovery file when no pid was recorded (back-compat, pre-liveness writers)', () => {
+      fs.writeFileSync('/tmp/__epd_test_discovery.json', JSON.stringify({ url: 'postgres://disc/db' }));
+      expect(resolvePgUrl(CFG)).toEqual({ url: 'postgres://disc/db', source: 'discovery-file' });
+    });
+
+    it('treats EPERM (alive but owned by another user) as alive, not dead', () => {
+      const killSpy = vi.spyOn(process, 'kill').mockImplementation(() => {
+        const err = new Error('EPERM') as NodeJS.ErrnoException;
+        err.code = 'EPERM';
+        throw err;
+      });
+      fs.writeFileSync(
+        '/tmp/__epd_test_discovery.json',
+        JSON.stringify({ url: 'postgres://disc/db', pid: 1 }),
+      );
+      expect(resolvePgUrl(CFG)).toEqual({ url: 'postgres://disc/db', source: 'discovery-file' });
+      killSpy.mockRestore();
+    });
+  });
 });

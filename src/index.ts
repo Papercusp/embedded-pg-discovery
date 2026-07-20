@@ -50,12 +50,41 @@ export function resolvePgUrl(config: DiscoveryConfig): PgUrlResult {
     const resolved = path.isAbsolute(p) ? p : path.join(os.homedir(), p);
     try {
       const raw = fs.readFileSync(resolved, 'utf8');
-      const parsed = JSON.parse(raw) as { url?: string };
-      if (parsed?.url) return { url: parsed.url, source: 'discovery-file' };
+      const parsed = JSON.parse(raw) as { url?: string; pid?: number };
+      // Liveness check: the file is written once at boot by the process that owns the
+      // embedded-pg instance and is never cleaned up on an unclean exit (crash, SIGKILL,
+      // host reboot) — so a STALE file from a long-dead writer otherwise wins forever over
+      // the correct native-PG fallback, and every consumer (deploy tooling, a fresh `npm run
+      // dev`, …) gets a permanent ECONNREFUSED on the recorded port until a human notices and
+      // deletes the file. When the file records a `pid`, verify that process is still alive
+      // (`process.kill(pid, 0)` — a same-host existence probe, no signal actually delivered;
+      // reliable on POSIX, and Node documents it as usable for existence-checking on Windows
+      // too) before trusting its port; a dead pid is treated exactly like a missing file
+      // (fall through to the next source). No `pid` recorded (an older writer, or a caller
+      // that never set one) preserves the prior unconditional-trust behavior — this is an
+      // additive safety check, not a stricter file-format requirement.
+      const pidLooksLive = parsed?.pid == null || isPidAlive(parsed.pid);
+      if (parsed?.url && pidLooksLive) return { url: parsed.url, source: 'discovery-file' };
     } catch {
       // file missing or unparseable — fall through
     }
   }
 
   return { url: config.fallbackUrl, source: 'fallback' };
+}
+
+/** Same-host process-existence probe: signal `0` delivers nothing, it only checks that the
+ *  pid is a live process this user can signal. Cheap + synchronous (no network I/O), so it's
+ *  safe to call on every {@link resolvePgUrl} invocation despite that function's "re-read per
+ *  call, no caching" contract (see the discovery-port-changes-across-launches note on the
+ *  Papercusp wrapper). Any thrown errno (ESRCH = gone, EPERM = alive but owned by another
+ *  user — still "alive", so EPERM must NOT read as dead) is handled explicitly rather than a
+ *  blanket catch, so a permissions quirk can't silently make a live port look stale. */
+function isPidAlive(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (e) {
+    return (e as NodeJS.ErrnoException)?.code === 'EPERM';
+  }
 }
