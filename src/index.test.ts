@@ -52,6 +52,82 @@ describe('resolvePgUrl', () => {
     expect(resolvePgUrl(CFG)).toEqual({ url: 'postgres://fallback/db', source: 'fallback' });
   });
 
+  // ── Port-reachability gate ────────────────────────────────────────────────
+  // Regression pins for a measured outage (2026-08-01): a discovery file
+  // advertised a port, its writer pid was ALIVE, and nothing was listening on
+  // that port — so the pid-only gate passed and every consumer on the box went
+  // into an ECONNREFUSED storm instead of using the healthy fallback.
+  //
+  // These are Linux-gated because the check reads /proc/net/tcp; elsewhere the
+  // function deliberately declines to judge (a check that cannot run must never
+  // reject a healthy config), so asserting rejection there would be wrong.
+  //
+  // ⚠ The first two tests are EACH OTHER'S mutation check, which is why both
+  // directions are pinned rather than just the bug: a gate stubbed to always-
+  // pass fails the dead-port test, and one stubbed to always-fail fails the
+  // listening-port test. Only a gate that genuinely discriminates on live port
+  // state passes both — so their joint green cannot be faked by removing the
+  // gate, and no source mutation is needed to prove they are live.
+  const onLinux = process.platform === 'linux' ? it : it.skip;
+
+  onLinux('THE OUTAGE: rejects a file whose pid is ALIVE but whose port is dead', () => {
+    // process.pid is unambiguously alive, so the pid gate passes and only the
+    // port gate can catch this — which is precisely the case that got through.
+    const deadPort = 9;
+    fs.writeFileSync(
+      '/tmp/__epd_test_discovery.json',
+      JSON.stringify({ url: `postgres://localhost:${deadPort}/papercusp`, port: deadPort, pid: process.pid }),
+    );
+    expect(resolvePgUrl(CFG)).toEqual({ url: 'postgres://fallback/db', source: 'fallback' });
+  });
+
+  onLinux('accepts a file whose advertised port IS being listened on', async () => {
+    const net = await import('node:net');
+    const server = net.createServer();
+    await new Promise<void>((r) => server.listen(0, '127.0.0.1', r));
+    const port = (server.address() as import('node:net').AddressInfo).port;
+    try {
+      fs.writeFileSync(
+        '/tmp/__epd_test_discovery.json',
+        JSON.stringify({ url: `postgres://localhost:${port}/papercusp`, port, pid: process.pid }),
+      );
+      expect(resolvePgUrl(CFG)).toEqual({
+        url: `postgres://localhost:${port}/papercusp`,
+        source: 'discovery-file',
+      });
+    } finally {
+      await new Promise<void>((r) => server.close(() => r()));
+    }
+  });
+
+  onLinux('a port that STOPS being served flips the verdict on the next resolve', () => {
+    // resolvePgUrl re-reads per call by contract; the port gate must honour
+    // that too, or a port that dies mid-process stays trusted forever — the
+    // "pinned to a dead port and never recovers" shape this whole module is about.
+    const port = 9;
+    fs.writeFileSync(
+      '/tmp/__epd_test_discovery.json',
+      JSON.stringify({ url: `postgres://localhost:${port}/db`, port, pid: process.pid }),
+    );
+    expect(resolvePgUrl(CFG).source).toBe('fallback');
+    expect(resolvePgUrl(CFG).source).toBe('fallback');
+  });
+
+  onLinux('derives the port from the URL when no explicit port field is present', () => {
+    fs.writeFileSync(
+      '/tmp/__epd_test_discovery.json',
+      JSON.stringify({ url: 'postgres://localhost:9/papercusp', pid: process.pid }),
+    );
+    expect(resolvePgUrl(CFG)).toEqual({ url: 'postgres://fallback/db', source: 'fallback' });
+  });
+
+  it('a file with NO port at all is still trusted (port gate has nothing to judge)', () => {
+    // Backward compatibility: older writers recorded no port. The gate must
+    // defer rather than reject, or it breaks every pre-existing discovery file.
+    fs.writeFileSync('/tmp/__epd_test_discovery.json', JSON.stringify({ url: 'postgres://disc/db' }));
+    expect(resolvePgUrl(CFG)).toEqual({ url: 'postgres://disc/db', source: 'discovery-file' });
+  });
+
   it('works with no discoveryFile configured', () => {
     expect(resolvePgUrl({ envVars: ['TEST_PG_A'], fallbackUrl: 'postgres://fb/db' }))
       .toEqual({ url: 'postgres://fb/db', source: 'fallback' });
