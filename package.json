@@ -9,6 +9,7 @@
   "exports": {
     ".": "./src/index.ts"
   },
+  "files": ["src", "README.md", "LICENSE", "SECURITY.md"],
   "scripts": {
     "test": "vitest run"
   },
