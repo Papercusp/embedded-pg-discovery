@@ -2,6 +2,7 @@
   "name": "@papercusp/embedded-pg-discovery",
   "version": "0.1.0",
   "private": true,
+  "license": "Apache-2.0",
   "type": "module",
   "description": "Generic Postgres connection-URL discovery for desktop / local-first apps: env vars → JSON discovery file → fallback. Pure, zero domain coupling, parameterized.",
   "main": "./src/index.ts",
